@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+#
+# Usage:
+#   servers list
+#   servers console <preset>    (easy|skill|rap)
+#   servers start <preset>      (easy|skill|rap|all)
+#   servers stop <preset>       (easy|skill|rap|all)
+#
+# This script controls multiple "surf" servers running in tmux sessions.
+# It also checks if a port is in use before starting a server.
+# Subcommands:
+#   list     -> show which sessions are running
+#   console  -> open the tmux console for a running server
+#   start    -> start one or all servers
+#   stop     -> stop (kill) one or all servers
+
+### CONFIG SECTION ###
+RUN_SURF_SCRIPT="/home/steam/servers/cs2_surf_easy/run_surf.sh"
+
+# Map each preset to a (tmux session name, port).
+declare -A PRESET_SESSIONS=(
+  ["easy"]="surf_easy"
+  ["skill"]="surf_skill"
+  ["rap"]="surf_rap"
+)
+declare -A PRESET_PORTS=(
+  ["easy"]="27015"
+  ["skill"]="27016"
+  ["rap"]="27017"
+)
+#######################
+
+function usage() {
+  echo "Usage: servers {list|console|start|stop} [easy|skill|rap|all]"
+  echo ""
+  echo "Examples:"
+  echo "  servers list"
+  echo "  servers console easy"
+  echo "  servers start all"
+  echo "  servers stop skill"
+  exit 1
+}
+
+########################
+# Helper: Show current surf sessions
+########################
+function list_sessions() {
+  echo "[Info] Checking for running surf tmux sessions..."
+  local found_something=0
+  while read -r line; do
+    if [[ "$line" =~ ^surf_ ]]; then
+      echo "  $line"
+      found_something=1
+    fi
+  done < <(tmux list-sessions 2>/dev/null || true)
+
+  if [[ $found_something -eq 0 ]]; then
+    echo "No surf sessions running."
+  fi
+}
+
+########################
+# Helper: Check if port is in use, prompt to kill occupant
+########################
+function check_and_free_port() {
+  local port="$1"
+
+  local occupant
+  occupant="$(lsof -ti :${port})"  # returns PIDs on that port
+  if [[ -n "$occupant" ]]; then
+    echo "[Warn] Port $port is already in use by PID(s): $occupant"
+    read -rp "Kill them so we can run on $port? [y/N] " choice
+    if [[ "$choice" =~ ^[Yy]$ ]]; then
+      echo "[Action] Killing PID(s): $occupant"
+      kill -9 $occupant
+      sleep 1
+    else
+      echo "[Info] Skipping server on port $port."
+      return 1  # Return non-zero => skip
+    fi
+  fi
+
+  return 0
+}
+
+########################
+# console_session
+########################
+function console_session() {
+  local preset="$1"
+  local session_name="${PRESET_SESSIONS[$preset]}"
+
+  # Validate preset
+  if [[ -z "$session_name" ]]; then
+    echo "[Error] Unknown preset '$preset'. Valid: easy, skill, rap."
+    exit 1
+  fi
+
+  # Check if tmux session is running
+  if ! tmux has-session -t "$session_name" 2>/dev/null; then
+    echo "[Error] Session '$session_name' not found. (Server might not be running?)"
+    exit 1
+  fi
+
+  echo "[Info] Attaching console for '$preset' (tmux: '$session_name')..."
+  tmux attach -t "$session_name"
+}
+
+########################
+# start_session
+########################
+function start_session() {
+  local preset="$1"
+  local session_name="${PRESET_SESSIONS[$preset]}"
+
+  if [[ -z "$session_name" ]]; then
+    echo "[Error] Unknown preset '$preset'. Valid: easy, skill, rap."
+    return 1
+  fi
+
+  # Already running?
+  if tmux has-session -t "$session_name" 2>/dev/null; then
+    echo "[Skip] Server '$preset' is already running (tmux: '$session_name')."
+    return 0
+  fi
+
+  # If we have a known port, let's check it
+  local port="${PRESET_PORTS[$preset]}"
+  if [[ -n "$port" ]]; then
+    echo "[Info] Checking if port $port is free for '$preset'..."
+    if ! check_and_free_port "$port"; then
+      echo "[Warn] Not starting '$preset' due to busy port $port."
+      return 1
+    fi
+  else
+    echo "[Warn] No port configured for '$preset'? Starting anyway..."
+  fi
+
+  echo "[Action] Starting '$preset' server in tmux session '$session_name'..."
+  tmux new-session -d -s "$session_name" \
+    "$RUN_SURF_SCRIPT $preset; echo 'Server exited. Press ENTER to close this tmux pane.'; read"
+}
+
+########################
+# stop_session
+########################
+function stop_session() {
+  local preset="$1"
+  local session_name="${PRESET_SESSIONS[$preset]}"
+
+  if [[ -z "$session_name" ]]; then
+    echo "[Error] Unknown preset '$preset'. Valid: easy, skill, rap."
+    return 1
+  fi
+
+  # Check if it's actually running
+  if ! tmux has-session -t "$session_name" 2>/dev/null; then
+    echo "[Info] Server '$preset' is not running or already stopped. (no tmux '$session_name')"
+    return 0
+  fi
+
+  echo "[Action] Stopping '$preset' (killing tmux session '$session_name')..."
+  tmux kill-session -t "$session_name"
+}
+
+### MAIN ###
+subcmd="$1"
+case "$subcmd" in
+  list)
+    list_sessions
+    ;;
+  console)
+    preset="$2"
+    [[ -z "$preset" ]] && usage
+    console_session "$preset"
+    ;;
+  start)
+    preset="$2"
+    [[ -z "$preset" ]] && usage
+    if [[ "$preset" == "all" ]]; then
+      for p in "${!PRESET_SESSIONS[@]}"; do
+        start_session "$p"
+      done
+    else
+      start_session "$preset"
+    fi
+    ;;
+  stop)
+    preset="$2"
+    [[ -z "$preset" ]] && usage
+    if [[ "$preset" == "all" ]]; then
+      for p in "${!PRESET_SESSIONS[@]}"; do
+        stop_session "$p"
+      done
+    else
+      stop_session "$preset"
+    fi
+    ;;
+  *)
+    usage
+    ;;
+esac
